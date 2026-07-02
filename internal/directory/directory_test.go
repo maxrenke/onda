@@ -37,6 +37,19 @@ func TestDirectoryPopularSortsByVotes(t *testing.T) {
 	}
 }
 
+func TestDirectoryPopularCapsAt100(t *testing.T) {
+	d := &Directory{}
+	d.setCorpus(nStations(150))
+
+	got, err := d.Popular(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 100 {
+		t.Fatalf("Popular should cap at 100 stations, got %d", len(got))
+	}
+}
+
 type fakeOnline struct {
 	queried string
 	result  []domain.Station
@@ -92,5 +105,62 @@ func TestSearchUsesCorpusWhenLoaded(t *testing.T) {
 	}
 	if len(got) == 0 || got[0].Name != "Jazz FM" {
 		t.Fatalf("want local corpus match, got %+v", got)
+	}
+}
+
+// fakeFetcher is an online Source that can also serve a full dump, so it
+// satisfies the fullFetcherProgress path used by RefreshWithProgress.
+type fakeFetcher struct{ stations []domain.Station }
+
+func (f *fakeFetcher) Search(context.Context, string) ([]domain.Station, error) { return nil, nil }
+func (f *fakeFetcher) FetchAllWithProgress(context.Context, func(int64)) ([]domain.Station, error) {
+	return f.stations, nil
+}
+
+func nStations(n int) []domain.Station {
+	out := make([]domain.Station, n)
+	for i := range out {
+		out[i] = domain.Station{Name: "s"}
+	}
+	return out
+}
+
+func TestMinPlausibleCorpusStaysNearFullCatalogScale(t *testing.T) {
+	if minPlausibleCorpus < 20000 {
+		t.Fatalf("minPlausibleCorpus = %d; want at least 20000 so partial dumps are rejected", minPlausibleCorpus)
+	}
+}
+
+func TestRefreshKeepsCorpusWhenDumpTooSmall(t *testing.T) {
+	d := &Directory{
+		Online: &fakeFetcher{stations: nStations(minPlausibleCorpus - 1)},
+		Corpus: NewCorpusStore(t.TempDir(), time.Hour),
+	}
+	d.setCorpus(nStations(3000)) // a good, existing corpus
+	if _, err := d.RefreshWithProgress(context.Background(), nil); err == nil {
+		t.Fatal("expected an incomplete dump to be rejected")
+	}
+	if len(d.snapshot()) != 3000 {
+		t.Fatalf("existing corpus must survive a rejected refresh, got %d", len(d.snapshot()))
+	}
+	if _, ok := d.CorpusSize(); ok {
+		t.Fatal("a rejected dump must not be persisted")
+	}
+}
+
+func TestRefreshReplacesCorpusWithFullDump(t *testing.T) {
+	d := &Directory{
+		Online: &fakeFetcher{stations: nStations(minPlausibleCorpus)},
+		Corpus: NewCorpusStore(t.TempDir(), time.Hour),
+	}
+	out, err := d.RefreshWithProgress(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if len(out) != minPlausibleCorpus || len(d.snapshot()) != minPlausibleCorpus {
+		t.Fatalf("corpus should be replaced by the full dump, got %d", len(d.snapshot()))
+	}
+	if _, ok := d.CorpusSize(); !ok {
+		t.Fatal("a full dump should be persisted")
 	}
 }

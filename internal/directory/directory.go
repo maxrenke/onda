@@ -4,11 +4,18 @@ package directory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 
 	"github.com/pedrosousa13/onda/internal/domain"
 )
+
+// minPlausibleCorpus is the floor below which a fetched dump is treated as
+// truncated/capped rather than the real catalogue. Radio Browser's usable
+// grouped catalogue is currently tens of thousands of stations, so this rejects
+// small-but-not-empty partial dumps before they overwrite a good corpus.
+const minPlausibleCorpus = 20000
 
 // Source is a provider of stations (online or offline).
 type Source interface {
@@ -186,6 +193,9 @@ func (d *Directory) RefreshWithProgress(ctx context.Context, onProgress func(dow
 	stations, err := f.FetchAllWithProgress(ctx, onProgress)
 	if err != nil {
 		return d.snapshot(), err
+	}
+	if len(stations) < minPlausibleCorpus {
+		return d.snapshot(), fmt.Errorf("station dump looks incomplete (%d stations); keeping existing catalog", len(stations))
 	}
 	d.setCorpus(stations)
 	if d.Corpus != nil {
