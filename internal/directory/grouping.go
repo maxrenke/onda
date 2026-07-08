@@ -5,20 +5,24 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/pedrosousa13/radio/internal/domain"
+	"github.com/pedrosousa13/onda/internal/domain"
 )
 
 // record is a normalized single-stream entry from any source.
 type record struct {
-	Name     string
-	Country  string
-	Tags     []string
-	Homepage string
-	Lat, Lon float64
-	URL      string
-	Codec    string
-	Bitrate  int
-	HLS      bool
+	Name       string
+	Country    string
+	Tags       []string
+	Homepage   string
+	Lat, Lon   float64
+	URL        string
+	Codec      string
+	Bitrate    int
+	HLS        bool
+	Votes      int
+	ClickCount int
+	Language   string
+	Trend      int
 }
 
 var (
@@ -106,8 +110,18 @@ func GroupRecords(recs []record) []domain.Station {
 			out = append(out, domain.Station{
 				Name: displayName(r.Name), Country: r.Country, Tags: r.Tags,
 				Homepage: r.Homepage, Lat: r.Lat, Lon: r.Lon,
+				Votes: r.Votes, ClickCount: r.ClickCount, Language: r.Language,
 			})
 			i = idx[k]
+		}
+		if r.Votes > out[i].Votes {
+			out[i].Votes = r.Votes
+		}
+		if r.ClickCount > out[i].ClickCount {
+			out[i].ClickCount = r.ClickCount
+		}
+		if r.Trend > out[i].Trend {
+			out[i].Trend = r.Trend
 		}
 		out[i].Variants = append(out[i].Variants, domain.StreamVariant{
 			URL: r.URL, Codec: r.Codec, Bitrate: r.Bitrate, HLS: r.HLS, Lossless: isHiFi(r),

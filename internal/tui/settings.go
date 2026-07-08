@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/pedrosousa13/onda/internal/directory"
 )
 
 func (m Model) updateSettings(k tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -32,6 +33,32 @@ func (m Model) updateSettings(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.store != nil {
 			_ = m.store.SaveTheme(m.themeName)
 		}
+	case "5":
+		m.updateCheck = !m.updateCheck
+		if m.store != nil {
+			_ = m.store.SaveUpdateCheck(m.updateCheck)
+		}
+	case "6":
+		m.liveSearch = !m.liveSearch
+		if m.store != nil {
+			_ = m.store.SaveLiveSearch(m.liveSearch)
+		}
+	case "7":
+		m.normalize = !m.normalize
+		if m.player != nil {
+			_ = m.player.SetNormalize(m.normalize)
+		}
+		if m.store != nil {
+			_ = m.store.SaveNormalize(m.normalize)
+		}
+	case "8":
+		if m.offlineCatalog == "on" {
+			m = m.disableCatalog()
+		} else {
+			return m.enableCatalog()
+		}
+	case "9":
+		m = m.clearCatalogCache()
 	}
 	return m, nil
 }
@@ -53,10 +80,30 @@ func (m Model) viewSettings() string {
 	b.WriteString(row("1", "audio quality", string(m.quality)) + "\n")
 	b.WriteString(row("2", "popularity tracking", m.tracking) + "\n")
 	b.WriteString(row("3", "play history", fmt.Sprintf("%v", m.history)) + "\n")
-	b.WriteString(row("4", "theme", m.themeName) + "\n\n")
+	b.WriteString(row("4", "theme", m.themeName) + "\n")
+	b.WriteString(row("5", "check for updates", fmt.Sprintf("%v", m.updateCheck)) + "\n")
+	b.WriteString(row("6", "live search", fmt.Sprintf("%v", m.liveSearch)) + "\n")
+	b.WriteString(row("7", "loudness normalization", fmt.Sprintf("%v", m.normalize)) + "\n")
+
+	// Show the true consent state so "ask" (undecided, banner still offering)
+	// isn't misread as "off" (explicitly declined).
+	catalogState := m.offlineCatalog
+	if catalogState == "" {
+		catalogState = "ask"
+	}
+	b.WriteString(row("8", "offline catalog", fmt.Sprintf("%s (%s)", catalogState, catalogSizeHint)) + "\n")
+
+	catalogCache := "not downloaded"
+	if m.dir != nil {
+		if n, ok := m.dir.CorpusSize(); ok {
+			catalogCache = directory.HumanBytes(n)
+		}
+	}
+	b.WriteString(row("9", "clear catalog cache", catalogCache) + "\n\n")
 
 	b.WriteString(m.st.Help.Render("  press a number to change · ") +
 		m.st.Key.Render("esc") + m.st.Help.Render(" back") + "\n")
 	b.WriteString(m.st.Help.Render("  tracking ‘never’ (default) reports nothing about what you play") + "\n")
+	b.WriteString(m.st.Help.Render("  live search off → queries sent only when you press ⏎") + "\n")
 	return b.String()
 }

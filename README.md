@@ -1,42 +1,61 @@
-# radio
+# onda
 
-Wander the world by radio, from your terminal. `radio` is an ethical,
-privacy-minded internet-radio TUI in the spirit of Radio Garden: browse stations
-by place, search, add your own, and listen — streaming **directly from
-broadcasters**, with nothing hosted, recorded, or rebroadcast by us.
+**onda — wander the airwaves.** An ethical, privacy-minded internet-radio TUI in
+the spirit of Radio Garden: browse stations by place, search, add your own, and
+listen — streaming **directly from broadcasters**, with nothing hosted, recorded,
+or rebroadcast by us. (*onda* is "wave" in Portuguese, Spanish, and Italian.)
 
 > Status: early v1. The bundled offline station list is a small starter set
 > pending a full public-domain import (see [Data sources](#data-sources--credits)).
 
+<table>
+  <tr>
+    <td><img width="100%" alt="CleanShot 2026-07-01 at 15 52 56" src="https://github.com/user-attachments/assets/f2705b01-04d2-4590-8aa9-4a6a220e01f2" /></td>
+    <td><img width="100%" alt="CleanShot 2026-07-01 at 15 53 18" src="https://github.com/user-attachments/assets/f0f4c990-5317-41e9-97be-ede6d2438fe6" /></td>
+  </tr>
+  <tr>
+    <td><img width="100%" alt="CleanShot 2026-07-01 at 15 54 06" src="https://github.com/user-attachments/assets/b3c5278c-fc4e-4853-acf8-696a6ae97e8c" /></td>
+    <td><img width="100%" alt="CleanShot 2026-07-01 at 15 54 13" src="https://github.com/user-attachments/assets/2046b497-23af-4d53-9ce5-351d2adc9aff" /></td>
+  </tr>
+</table>
+
 ## Ethics & privacy
 
-`radio` behaves like a browser pointed at a stream you chose. It connects you
+`onda` behaves like a browser pointed at a stream you chose. It connects you
 **directly** to the broadcaster's public server.
 
 - **No recording**, ever.
 - **No geo-unblocking** — region-locked streams simply fail.
 - **No proxy, no rebroadcast** — one direct connection, nothing re-hosted.
-- **Silent by default** — popularity tracking defaults to `never`, so `radio`
+- **Silent by default** — popularity tracking defaults to `never`, so `onda`
   reports nothing about what you listen to. You can opt in (`opt-in`/`opt-out`)
   in settings to contribute to community rankings if you want.
-- **Local-only data** — favorites, custom stations, and config never leave your
-  machine. No telemetry.
+- **Local-only data** — favorites, custom stations, config, and (opt-in) play
+  history never leave your machine. No telemetry.
 - **Public-domain data** — station data comes from the public-domain
   [Radio Browser](https://www.radio-browser.info) project plus a bundled CC0 list.
 
-Streaming inherently exposes your IP to the broadcaster, and searches go to Radio
-Browser mirrors — the same as any internet-radio app. `radio` tells you this on
-first run.
+Streaming inherently exposes your IP to the broadcaster, the same as any
+internet-radio app. Search is **opt-in local**. By default `onda` searches
+Radio Browser over the network as you type (debounced — one query per typing
+pause), exactly like other clients. If you opt in — from the first-run prompt,
+the hint shown after a search finds nothing, or Settings — `onda` downloads the
+full public station directory once (~30 MB, in the background with a live
+progress readout) and from then on searches that **local** copy: it becomes
+typo-tolerant (so `raido eins` still finds `Radio Eins`) and your queries are
+**not** sent anywhere as you type. The local list refreshes about once a week,
+or on demand with `R`. Turn it off anytime in Settings; the cached list is a
+plain file you can delete.
 
 ## Install
 
-`radio` runs on **Linux, macOS, and Windows**. It requires
+`onda` runs on **Linux, macOS, and Windows**. It requires
 [`mpv`](https://mpv.io) on your `PATH` for playback.
 
 ### macOS / Linux — Homebrew (recommended)
 
 ```sh
-brew install pedrosousa13/tap/radio
+brew install pedrosousa13/tap/onda
 ```
 
 This also installs `mpv`.
@@ -45,14 +64,14 @@ This also installs `mpv`.
 
 ```sh
 scoop bucket add pedrosousa13 https://github.com/pedrosousa13/scoop-bucket
-scoop install radio
+scoop install onda
 scoop install mpv
 ```
 
 ### Any OS — Go
 
 ```sh
-go install github.com/pedrosousa13/radio@latest
+go install github.com/pedrosousa13/onda@latest
 ```
 
 Install `mpv` separately (`brew install mpv`, `scoop install mpv`, or your
@@ -61,15 +80,31 @@ distro's package manager).
 ### Any OS — prebuilt binary
 
 Download the archive for your platform from the
-[Releases](https://github.com/pedrosousa13/radio/releases) page and put `radio`
+[Releases](https://github.com/pedrosousa13/onda/releases) page and put `onda`
 on your `PATH`. Ensure `mpv` is installed.
+
+## Updating
+
+onda checks GitHub once a day for a newer release and shows a one-line banner
+when one is available. How you update depends on how you installed it:
+
+- **Homebrew:** `brew upgrade --cask onda`
+- **Scoop:** `scoop update onda`
+- **Prebuilt binary:** press <kbd>u</kbd> on the banner to update in place — onda
+  downloads the matching release archive, verifies its SHA256 against the
+  release's `checksums.txt`, and atomically replaces itself. Press <kbd>U</kbd>
+  to dismiss the banner.
+
+The check is a single request to the public GitHub API (no account, no token).
+It's on by default; turn it off in settings (`,` then `5`). Releases are
+checksum-verified today; cryptographic signing is a planned follow-up.
 
 ## Usage
 
 Launch:
 
 ```sh
-radio
+onda
 ```
 
 ### Keys
@@ -82,19 +117,46 @@ radio
 | `enter` | Play selected station |
 | `s` | Stop |
 | `+` / `-` | Volume up / down |
+| `[` / `]` | Higher / lower bitrate (when a station offers several) |
 | `f` | Toggle favorite on selected station |
 | `F` | Show favorites |
+| `r` | Recently played (when play history is on) |
+| `c` | Clear play history (in the recents view) |
 | `p` | Popular (top-voted worldwide) |
+| `R` | Refresh the local station list from Radio Browser |
 | `esc` | Back to Home |
 | `/` | Search |
+| `b` | Browse by country / genre / language |
+| `o` | Sort browse list (votes / name / trending) |
+| `O` | Reverse sort order |
 | `a` | Add a custom station |
 | `,` | Settings |
+| `u` / `U` | Update onda (when offered) / dismiss the update banner |
 | `esc` | Back to browse |
 | `q` | Quit |
 
-**Search** — type a query, `enter` to search, `esc` to cancel. Matches **name,
-country, and tags** (queried in parallel) and ranks results best-match-first with
-light fuzzy/typo tolerance.
+**Mouse** — the scroll wheel moves the selection, a click selects a station, and
+clicking the selected station again plays it. Hovering marks the row under the
+cursor. (Keyboard remains fully supported; the mouse is optional.)
+
+**Search** — results appear **as you type**, instantly, from a local copy of the
+directory (no network round-trip, works offline). Use `↑`/`↓` to pick a result
+and `enter` to play it; `esc` cancels.
+
+One search box covers **station name, country, and genre/tags** — there are no
+prefixes or modes, just type what you know:
+
+- **By name** — `kexp`, `radio eins`
+- **By country** — `japan`, `portugal` (country name, as Radio Browser labels it)
+- **By genre / tag** — `jazz`, `lo-fi`, `techno`, `news`
+
+Results are ranked best-match-first across all three fields, and small typos are
+tolerated — `raido eins` still finds **Radio Eins**. The local list refreshes
+from Radio Browser automatically about once a week; press `R` (in Home or a
+browse list) to refresh it on demand.
+
+While a stream connects, the now-playing panel shows **`connecting…`**, then the
+song title once audio starts — or a clear message if the stream can't be reached.
 
 **Add a station** — `tab` (or `↑`/`↓`) to move between *name*, *URL*, and
 *bitrate* (optional); `enter` to save; `esc` to cancel. Custom stations are saved
@@ -102,16 +164,26 @@ locally and appear alongside everything else.
 
 **Settings** — `1` cycles audio quality (highest / balanced / lowest), `2` cycles
 popularity tracking (never / opt-in / opt-out), `3` toggles play history, `4` cycles
-the **theme**; `esc` to go back. Changes are saved immediately.
+the **theme**, `5` toggles the daily update check, `6` toggles **live search**
+(search as you type; off → enter-to-search), `7` toggles **loudness
+normalization** (evens out volume jumps between stations; off by default, applies
+live); `esc` to go back. Changes are saved immediately.
 
-When a station offers multiple bitrates, `radio` auto-picks per your quality
+**Recently played** — when **play history** is on (settings `3`, off by default),
+the stations you play are remembered locally and listed under `r` (newest first,
+de-duplicated). The latest few also surface as a **recent** section on Home, above
+your favorites. It never leaves your machine; `c` in the recents view clears it.
+
+When a station offers multiple bitrates, `onda` auto-picks per your quality
 setting (default: highest).
 
-On launch you land on **Home** — your now-playing panel plus your favorites (or a
-**Popular** preview, the top-voted stations worldwide, until you've saved any).
+On launch you land on **Home** — your now-playing panel, a **recent** section when
+play history is on, plus your favorites (or a **Popular** preview, the top-voted
+stations worldwide, until you've saved any).
 From anywhere: `esc` returns Home, `p` opens the full Popular list, `F` favorites,
-`/` search. Popular comes from Radio Browser's open ranking — reading it reports
-nothing about you.
+`b` browse by country/genre/language (with `o`/`O` to sort), or `/` search. Browse and Popular
+read the local station catalog and are richest once you've downloaded the full offline directory (see Settings / live search).
+Popular comes from Radio Browser's open ranking — reading it reports nothing about you.
 
 ### Themes
 
@@ -124,19 +196,29 @@ your choice is saved to `config.toml`.
 Config and data live under your OS config directory (resolved via Go's
 `os.UserConfigDir`):
 
-- Linux: `~/.config/radio/`
-- macOS: `~/Library/Application Support/radio/`
-- Windows: `%AppData%\radio\`
+- Linux: `~/.config/onda/`
+- macOS: `~/Library/Application Support/onda/`
+- Windows: `%AppData%\onda\`
 
 Files:
 
 - `config.toml` — `quality` (highest|balanced|lowest), `tracking`
-  (never|opt-in|opt-out), `history_enabled`, `theme`
+  (never|opt-in|opt-out), `history_enabled`, `theme`, `update_check`
+  (daily update check; `true` by default), `live_search` (search as you type;
+  `true` by default — set `false` for enter-to-search), `volume` (0–100,
+  restored on launch), `normalize` (loudness normalization; `false` by default)
 - `favorites.json`, `custom.json` — your favorites and added stations
+- `recents.json` — your play history (only written when `history_enabled` is on)
 
-Cached Radio Browser results live under your OS cache directory
-(`os.UserCacheDir`, e.g. `~/.cache/radio/` on Linux) with a 24-hour TTL; stale
-cache is still served when you're offline.
+Everything onda persists lives in this one directory in plain TOML/JSON, so you
+can symlink or sync it with your dotfiles to carry your config and favorites
+across machines.
+
+The local station list lives under your OS cache directory (`os.UserCacheDir`,
+e.g. `~/.cache/onda/` on Linux) as a gzipped snapshot of the Radio Browser
+directory. onda searches it locally and refreshes it from Radio Browser only when
+it's older than **7 days** or you press `R`. The update check caches its result
+there too (`update-cache.json`), so onda hits GitHub at most once a day.
 
 Defaults are privacy-first: quality `highest`, tracking `never`, history disabled.
 
@@ -144,7 +226,7 @@ Defaults are privacy-first: quality `highest`, tracking `never`, history disable
 
 Radio Browser is crowd-sourced and has **no canonical station IDs**, so the same
 station often appears many times (different bitrates, `(Hi-Fi)`/`(metadata)`
-suffixes, broadcaster prefixes like `RTP `, punctuation). `radio` merges these
+suffixes, broadcaster prefixes like `RTP `, punctuation). `onda` merges these
 heuristically — normalizing names and grouping by name + country, then offering
 the distinct bitrates as a `[ ]` chooser. It's best-effort: a few stragglers may
 remain rather than risk merging genuinely different stations. Perfect grouping
@@ -159,13 +241,13 @@ isn't possible without canonical IDs the source doesn't provide.
 
 ## Building from source
 
-Requires Go 1.24+ and `mpv`.
+Requires Go 1.25+ and `mpv`.
 
 ```sh
-git clone https://github.com/pedrosousa13/radio
-cd radio
-go build -o radio .
-./radio
+git clone https://github.com/pedrosousa13/onda
+cd onda
+go build -o onda .
+./onda
 ```
 
 Run the tests with `go test ./...` (add `-race` if your Go has a C toolchain).

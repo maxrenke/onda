@@ -3,11 +3,13 @@ package tui
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/pedrosousa13/radio/internal/domain"
+	"github.com/pedrosousa13/onda/internal/domain"
+	"github.com/pedrosousa13/onda/internal/update"
 )
 
 type view int
@@ -19,12 +21,39 @@ const (
 	viewFavorites
 	viewAdd
 	viewSettings
+	viewRecents
+	viewBrowseMenu
 )
+
+// playbackPhase tracks what the now-playing panel should honestly report.
+type playbackPhase int
+
+const (
+	phaseIdle playbackPhase = iota
+	phaseConnecting
+	phasePlaying
+	phaseFailed
+)
+
+// connectTimeout marks a play attempt as failed if it never starts playing.
+const connectTimeout = 12 * time.Second
+
+// homeRecentsCap bounds the "recent" section shown above favorites on Home.
+const homeRecentsCap = 5
+
+// homePopularPreviewCap keeps Home as a compact landing page. The full Popular
+// list remains available from the Browse/Popular view.
+const homePopularPreviewCap = 5
+
+// catalogSizeHint is the approximate download size shown in the offer UI.
+// (Task 10 replaces this with a measured figure.)
+const catalogSizeHint = "~30 MB"
 
 type Player interface {
 	Play(url string) error
 	Stop() error
 	Volume(pct int) error
+	SetNormalize(on bool) error
 }
 
 // Store is the persistence slice the TUI needs.
@@ -38,41 +67,77 @@ type Store interface {
 	SaveTracking(string) error
 	SaveHistory(bool) error
 	SaveTheme(string) error
+	SaveOfflineCatalog(string) error
+	SaveUpdateCheck(bool) error
+	SaveLiveSearch(bool) error
+	SaveVolume(int) error
+	SaveNormalize(bool) error
+	Recents() ([]domain.Station, error)
+	AddRecent(domain.Station) error
+	ClearRecents() error
 }
 
 type Model struct {
-	dir       Searcher
-	player    Player
-	store     Store
-	view      view
-	stations  []domain.Station
-	cursor    int
-	status    string
-	nowTitle  string
-	playing   domain.Station
-	varIdx    int // index into playing.Variants currently streaming
-	isPlaying bool
-	quality   domain.QualityPref
-	tracking  string
-	history   bool
-	volume    int
-	themeName string
-	st        Styles
-	width     int
-	height    int
-	favKeys   map[string]bool
-	sp        spinner.Model
-	loading   bool
-	crumb     string
+	dir             Searcher
+	player          Player
+	store           Store
+	view            view
+	stations        []domain.Station
+	cursor          int
+	hoverIdx        int // station row under the mouse, -1 if none
+	status          string
+	nowTitle        string
+	playing         domain.Station
+	varIdx          int // index into playing.Variants currently streaming
+	isPlaying       bool
+	phase           playbackPhase
+	playErr         string // message shown when phase == phaseFailed
+	playAttempt     int    // monotonic; guards stale connect timeouts
+	quality         domain.QualityPref
+	tracking        string
+	history         bool
+	volume          int
+	normalize       bool
+	themeName       string
+	st              Styles
+	width           int
+	height          int
+	favKeys         map[string]bool
+	homeRecents     []domain.Station // leading "recent" section on Home (opt-in, capped)
+	homeFavoritesN  int              // favorite rows after homeRecents and before Popular on Home
+	sp              spinner.Model
+	loading         bool
+	refreshing      bool
+	needsRefresh    bool
+	offlineCatalog  string // consent: ask|on|off — gates auto-download in Init
+	bannerDismissed bool   // "not now" on the Home offline-catalog banner this session
+	downloaded      int64
+	progress        chan int64
+	crumb           string
 
-	search   textinput.Model
-	addName  textinput.Model
-	addURL   textinput.Model
-	addBr    textinput.Model
-	addFocus int // 0=name, 1=url, 2=bitrate
+	browseLevel int // 0=axis menu, 1=facet list, 2=stations within a facet
+	browseAxis  domain.Axis
+	facets      []domain.Facet
+	browseValue string
+	browseSort  domain.Sort
+
+	update         update.Status
+	updateDismiss  bool
+	updateApplying bool
+	updateCheck    bool   // user preference (drives settings toggle)
+	version        string // build version, for the update check
+	updateCacheDir string // where update-cache.json lives
+
+	search     textinput.Model
+	searchSeq  int  // live-search debounce generation
+	liveSearch bool // search as you type; off → enter-to-search
+	addName    textinput.Model
+	addURL     textinput.Model
+	addBr      textinput.Model
+	addFocus   int // 0=name, 1=url, 2=bitrate
 }
 
-func New(dir Searcher, p Player, st Store, quality domain.QualityPref, tracking string, history bool, theme string) Model {
+func New(dir Searcher, p Player, st Store, quality domain.QualityPref, tracking string, history bool, theme string, updateCheck, liveSearch bool, volume int, normalize bool, needsRefresh bool, consent string, version, updateCacheDir string) Model {
 	search := textinput.New()
 	search.Placeholder = "search stations, country, or genre…"
 	name := textinput.New()
@@ -88,36 +153,122 @@ func New(dir Searcher, p Player, st Store, quality domain.QualityPref, tracking 
 	m := Model{
 		dir: dir, player: p, store: st,
 		quality: quality, tracking: tracking, history: history,
-		volume: 100, themeName: t.Name, st: newStyles(t),
+		volume: clampVolume(volume), normalize: normalize, themeName: t.Name, st: newStyles(t),
 		width: 80, height: 24, favKeys: map[string]bool{},
-		sp: sp, view: viewHome, crumb: "home",
-		search: search, addName: name, addURL: url, addBr: br,
+		hoverIdx: -1,
+		sp:       sp, view: viewHome, crumb: "home",
+		needsRefresh: needsRefresh, refreshing: needsRefresh, offlineCatalog: consent,
+		updateCheck: updateCheck, version: version, updateCacheDir: updateCacheDir,
+		liveSearch: liveSearch,
+		search:     search, addName: name, addURL: url, addBr: br,
 	}
-	// Seed Home with favorites; if there are none, Init fetches a Popular preview.
+	// Seed Home: opt-in recents on top, then favorites; if there are no
+	// favorites, Init fetches a Popular preview (recents stay pinned on top).
 	if st != nil {
-		if favs, err := st.Favorites(); err == nil && len(favs) > 0 {
-			m.stations = favs
-			m.markFavorites()
-		} else {
+		m.homeRecents = m.recentsForHome()
+		favs, err := st.Favorites()
+		if err != nil {
+			favs = nil
+		}
+		m.homeFavoritesN = len(favs)
+		m.stations = append(append([]domain.Station{}, m.homeRecents...), favs...)
+		m.markFavorites()
+		if dir != nil {
 			m.loading = true
 		}
 	} else {
 		m.loading = true
 	}
+	// Created here, not in Init(): Init has a value receiver, so it can't
+	// persist a channel onto the running model. The R-key path uses startRefresh().
+	if needsRefresh {
+		m.progress = make(chan int64, 1)
+	}
 	return m
 }
 
 func (m Model) Init() tea.Cmd {
-	if m.loading { // no favorites yet → load a Popular preview for Home
-		return tea.Batch(popularCmd(m.dir), m.sp.Tick)
+	cmds := []tea.Cmd{}
+	if m.loading { // no favorites yet → load a vote-sorted Popular preview for Home
+		cmds = append(cmds, popularCmd(m.dir), m.sp.Tick)
 	}
-	return nil
+	if m.needsRefresh { // refresh the corpus in the background
+		cmds = append(cmds, refreshWithProgressCmd(m.dir, m.progress), listenProgressCmd(m.progress), m.sp.Tick)
+	}
+	if m.updateCheck && m.version != "" && !strings.HasSuffix(m.version, "-dev") {
+		cmds = append(cmds, updateCheckCmd(m.version, m.updateCacheDir))
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
 }
 
 // load starts an async station fetch and shows the spinner until it returns.
 func (m Model) load(cmd tea.Cmd) (tea.Model, tea.Cmd) {
 	m.loading = true
 	return m, tea.Batch(cmd, m.sp.Tick)
+}
+
+// startRefresh kicks off a background corpus download with live byte progress.
+// It no-ops if a download is already in flight, so rapid enable/toggle (banner,
+// hint, settings, or R) can't spawn concurrent full-dump fetches.
+func (m Model) startRefresh() (Model, tea.Cmd) {
+	if m.refreshing {
+		return m, nil
+	}
+	m.progress = make(chan int64, 1)
+	m.refreshing = true
+	return m, tea.Batch(refreshWithProgressCmd(m.dir, m.progress), listenProgressCmd(m.progress), m.sp.Tick)
+}
+
+// enableCatalog opts in, persists consent, and starts the background download.
+// Shared by the Home banner, the search hint, and the settings row.
+func (m Model) enableCatalog() (Model, tea.Cmd) {
+	m.offlineCatalog = "on"
+	if m.store != nil {
+		_ = m.store.SaveOfflineCatalog("on")
+	}
+	return m.startRefresh()
+}
+
+// disableCatalog turns the offline catalog off and persists the choice; it does
+// not delete any cached dump (the user can remove the file by hand).
+func (m Model) disableCatalog() Model {
+	m.offlineCatalog = "off"
+	if m.store != nil {
+		_ = m.store.SaveOfflineCatalog("off")
+	}
+	return m
+}
+
+// clearCatalogCache deletes the cached dump, drops the in-memory corpus, and
+// turns the catalog off so it won't silently re-download.
+func (m Model) clearCatalogCache() Model {
+	if m.dir != nil {
+		_ = m.dir.ClearCorpus()
+	}
+	m.offlineCatalog = "off"
+	if m.store != nil {
+		_ = m.store.SaveOfflineCatalog("off")
+	}
+	m.status = "offline catalog cache cleared"
+	return m
+}
+
+// bannerVisible reports whether the first-launch offline-catalog offer should
+// be shown: only on Home, only while consent is still undecided, and only
+// until the user dismisses it with "not now" for this session.
+func (m Model) bannerVisible() bool {
+	return m.view == viewHome && m.offlineCatalog == "ask" && !m.bannerDismissed
+}
+
+// shouldOfferCatalogHint reports whether a weak search result should offer to
+// enable the offline catalog: only while consent is undecided, only for a
+// real query that still found nothing.
+func (m Model) shouldOfferCatalogHint(query string, results int) bool {
+	return m.offlineCatalog != "on" && results == 0 &&
+		len([]rune(strings.TrimSpace(query))) >= minSearchLen
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -127,28 +278,183 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case stationsMsg:
 		m.loading = false
-		m.stations = msg.stations
+		if m.view == viewHome {
+			// Home's Popular preview loads async; keep recents and favorites pinned above it.
+			m.rebuildHomeStations(msg.stations)
+			return m, nil
+		} else {
+			m.stations = msg.stations
+		}
 		m.cursor = 0
 		m.markFavorites()
+		return m, nil
+	case facetsMsg:
+		m.loading = false
+		m.browseAxis = msg.axis
+		m.facets = msg.facets
+		m.browseLevel = 1
+		m.cursor = 0
 		return m, nil
 	case errMsg:
 		m.loading = false
 		m.status = "error: " + msg.err.Error()
 		return m, nil
+	case corpusProgressMsg:
+		m.downloaded = msg.downloaded
+		return m, listenProgressCmd(m.progress) // keep listening
+	case corpusRefreshedMsg:
+		m.refreshing = false
+		m.downloaded = 0
+		if msg.err != nil {
+			m.status = "couldn't refresh — keeping current stations"
+			return m, nil
+		}
+		m.status = "station list updated"
+		// Re-pull the vote-sorted popular preview only where it's actually shown:
+		// on Home ONLY when there are no favorites (otherwise Home shows the
+		// favorites list — don't clobber it), and on the popular browse view.
+		if (m.view == viewHome && len(m.favKeys) == 0) || (m.view == viewBrowse && m.crumb == "popular") {
+			return m.load(popularCmd(m.dir))
+		}
+		return m, nil
 	case titleMsg:
 		m.nowTitle = sanitizeTitle(msg.title)
 		return m, nil
+	case playingMsg:
+		// core-idle just went false → audio is actually flowing.
+		m.phase = phasePlaying
+		m.isPlaying = true
+		return m, nil
+	case idleMsg:
+		// Only a real end/stop while playing returns us to idle; ignore the
+		// transient idle that precedes playback during connecting.
+		if m.phase == phasePlaying {
+			m.phase = phaseIdle
+			m.isPlaying = false
+		}
+		return m, nil
+	case playErrMsg:
+		m.phase = phaseFailed
+		m.playErr = "couldn't connect — the stream may be offline"
+		return m, nil
+	case connectTimeoutMsg:
+		if msg.attempt == m.playAttempt && m.phase == phaseConnecting {
+			m.phase = phaseFailed
+			m.playErr = "still connecting — the stream may be slow or offline"
+		}
+		return m, nil
+	case updateMsg:
+		m.update = msg.status
+		return m, nil
+	case updateAppliedMsg:
+		m.updateApplying = false
+		if msg.err != nil {
+			m.status = "update failed: " + msg.err.Error()
+		} else {
+			m.status = "updated to " + m.update.Latest + " — restart onda to apply"
+		}
+		return m, nil
+	case searchDebounceMsg:
+		// Only the latest keystroke's tick, still in the search view, searches.
+		// A toggle to enter-to-search mid-type can leave a tick in flight.
+		if !m.liveSearch || m.view != viewSearch || msg.seq != m.searchSeq {
+			return m, nil
+		}
+		q := strings.TrimSpace(m.search.Value())
+		if len([]rune(q)) < minSearchLen {
+			m.stations = nil // clear stale preview
+			return m, nil
+		}
+		m.loading = true
+		return m, tea.Batch(searchCmd(m.dir, q), m.sp.Tick)
 	case spinner.TickMsg:
-		if !m.loading {
+		if !m.loading && !m.refreshing {
 			return m, nil
 		}
 		var cmd tea.Cmd
 		m.sp, cmd = m.sp.Update(msg)
 		return m, cmd
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
 	return m, nil
+}
+
+// handleMouse maps wheel/click/hover to list actions. Input views (search,
+// add, settings) keep their keyboard focus and ignore the mouse.
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch m.view {
+	case viewSearch, viewAdd, viewSettings, viewBrowseMenu:
+		return m, nil
+	}
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		if m.cursor > 0 {
+			m.cursor--
+		}
+	case tea.MouseButtonWheelDown:
+		if m.cursor < len(m.stations)-1 {
+			m.cursor++
+		}
+	case tea.MouseButtonLeft:
+		if msg.Action == tea.MouseActionPress {
+			if idx := m.stationAtY(msg.Y); idx >= 0 {
+				if idx == m.cursor {
+					return m.playSelected() // click the selected row again → play
+				}
+				m.cursor = idx
+			}
+		}
+	default:
+		if msg.Action == tea.MouseActionMotion {
+			m.hoverIdx = m.stationAtY(msg.Y)
+		}
+	}
+	return m, nil
+}
+
+// stationAtY maps a screen row to a visible station index, or -1 if the row
+// isn't over a station. Geometry mirrors viewList/viewHome layout.
+func (m Model) stationAtY(y int) int {
+	rowStartY := 3 // header(2) + blank(1)
+	listRows := m.height - chromeHeight
+	if m.view == viewHome {
+		labelY := 10 // header(2)+blank(1)+panel(5)+hint(1)+blank(1)
+		listRows = m.height - 13
+		if listRows < 3 {
+			listRows = 3
+		}
+		start, end := windowBounds(m.cursor, len(m.stations), listRows)
+		for _, sec := range m.homeSections() {
+			visStart, visEnd := sec.start, sec.end
+			if visStart < start {
+				visStart = start
+			}
+			if visEnd > end {
+				visEnd = end
+			}
+			if visStart >= visEnd {
+				continue
+			}
+			rowStartY := labelY + 1
+			if y >= rowStartY && y < rowStartY+(visEnd-visStart) {
+				return visStart + (y - rowStartY)
+			}
+			labelY = rowStartY + (visEnd - visStart)
+		}
+		return -1
+	}
+	if listRows < 3 {
+		listRows = 3
+	}
+	start, end := windowBounds(m.cursor, len(m.stations), listRows)
+	idx := start + (y - rowStartY)
+	if y >= rowStartY && idx >= start && idx < end && idx < len(m.stations) {
+		return idx
+	}
+	return -1
 }
 
 func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -160,6 +466,20 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateAdd(k)
 	case viewSettings:
 		return m.updateSettings(k)
+	case viewBrowseMenu:
+		return m.updateBrowseMenu(k)
+	}
+
+	// The first-launch offline-catalog offer intercepts y/n/esc while it's up,
+	// on top of (not instead of) the normal Home key handling below.
+	if m.bannerVisible() {
+		switch k.String() {
+		case "y":
+			return m.enableCatalog()
+		case "n", "esc":
+			m.bannerDismissed = true
+			return m, nil
+		}
 	}
 
 	// Browse + favorites: list navigation.
@@ -179,6 +499,8 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "s":
 		_ = m.player.Stop()
 		m.isPlaying = false
+		m.phase = phaseIdle
+		m.playErr = ""
 		m.status = "stopped"
 	case "+", "=":
 		return m.changeVolume(5)
@@ -190,19 +512,43 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.changeVariant(1) // lower quality
 	case "f":
 		return m.toggleFavorite()
+	case "u":
+		if m.update.SelfUpdatable && !m.updateApplying {
+			m.updateApplying = true
+			return m, applyUpdateCmd(m.update)
+		}
+	case "U": // dismiss the update banner
+		m.updateDismiss = true
+		return m, nil
 	case "/":
 		m.view = viewSearch
+		m.browseLevel = 0
 		m.search.SetValue("")
 		m.search.Focus()
+		m.hoverIdx = -1
+		m.stations = nil // start the live-search preview empty
 		return m, nil
 	case "F":
 		return m.showFavorites()
+	case "r":
+		return m.showRecents()
+	case "c":
+		if m.view == viewRecents {
+			return m.clearRecents()
+		}
 	case "p", "P":
 		m.view = viewBrowse
+		m.browseLevel = 0
 		m.crumb = "popular"
 		return m.load(popularCmd(m.dir))
+	case "R":
+		if !m.refreshing {
+			return m.startRefresh()
+		}
+		return m, nil
 	case "a":
 		m.view = viewAdd
+		m.browseLevel = 0
 		m.addFocus = 0
 		m.addName.SetValue("")
 		m.addURL.SetValue("")
@@ -212,25 +558,126 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case ",":
 		m.view = viewSettings
 		return m, nil
+	case "b", "B":
+		return m.openBrowse()
+	case "o":
+		if m.browseLevel == 2 {
+			m.browseSort = m.browseSort.Next()
+			m.crumb = m.browseValue + " · " + m.browseSort.Label()
+			return m.load(stationsByCmd(m.dir, m.browseAxis, m.browseValue, m.browseSort))
+		}
+	case "O":
+		if m.browseLevel == 2 {
+			m.browseSort.Flip = !m.browseSort.Flip
+			m.crumb = m.browseValue + " · " + m.browseSort.Label()
+			return m.load(stationsByCmd(m.dir, m.browseAxis, m.browseValue, m.browseSort))
+		}
 	case "esc":
+		if m.browseLevel == 2 {
+			m.view = viewBrowseMenu
+			m.browseLevel = 1
+			m.cursor = 0
+			return m, nil
+		}
 		return m.goHome()
 	}
 	return m, nil
 }
 
-// goHome returns to the Home view: favorites if any, else a Popular preview.
+// goHome returns to the Home view: opt-in recents, favorites, and a compact
+// Popular preview.
 func (m Model) goHome() (tea.Model, tea.Cmd) {
 	m.view = viewHome
+	m.browseLevel = 0
 	m.crumb = "home"
-	if m.store != nil {
-		if favs, err := m.store.Favorites(); err == nil && len(favs) > 0 {
-			m.stations = favs
-			m.cursor = 0
-			m.markFavorites()
-			return m, nil
+	m.cursor = 0
+	m.rebuildHomeStations(nil)
+	if m.dir == nil {
+		return m, nil
+	}
+	return m.load(popularCmd(m.dir))
+}
+
+// recentsForHome returns the capped, newest-first play history shown as the
+// "recent" section on Home, or nil when the user hasn't opted into history.
+func (m Model) recentsForHome() []domain.Station {
+	if !m.history || m.store == nil {
+		return nil
+	}
+	rec, err := m.store.Recents()
+	if err != nil || len(rec) == 0 {
+		return nil
+	}
+	if len(rec) > homeRecentsCap {
+		rec = rec[:homeRecentsCap]
+	}
+	return rec
+}
+
+func (m *Model) rebuildHomeStations(popular []domain.Station) {
+	m.homeRecents = m.recentsForHome()
+	favs := m.favoriteStations()
+	m.homeFavoritesN = len(favs)
+	m.markFavorites()
+
+	out := append([]domain.Station{}, m.homeRecents...)
+	out = append(out, favs...)
+	out = append(out, homePopularPreview(popular, m.favKeys)...)
+	m.stations = out
+	m.clampCursor()
+}
+
+func homePopularPreview(stations []domain.Station, favs map[string]bool) []domain.Station {
+	out := make([]domain.Station, 0, homePopularPreviewCap)
+	for _, st := range stations {
+		if favs[favKey(st)] {
+			continue
+		}
+		out = append(out, st)
+		if len(out) == homePopularPreviewCap {
+			break
 		}
 	}
-	return m.load(popularCmd(m.dir)) // no favorites → Popular preview
+	return out
+}
+
+func (m Model) homePopularStations() []domain.Station {
+	if m.view != viewHome {
+		return nil
+	}
+	start := m.homeRecentsN() + m.homeFavoritesCount()
+	if start >= len(m.stations) {
+		return nil
+	}
+	return append([]domain.Station{}, m.stations[start:]...)
+}
+
+// homeRecentsN is the number of leading rows in m.stations that make up the
+// Home "recent" section. Zero unless we're on Home with recorded history.
+func (m Model) homeRecentsN() int {
+	if m.view != viewHome {
+		return 0
+	}
+	n := len(m.homeRecents)
+	if n > len(m.stations) {
+		n = len(m.stations)
+	}
+	return n
+}
+
+func (m Model) homeFavoritesCount() int {
+	if m.view != viewHome {
+		return 0
+	}
+	recN := m.homeRecentsN()
+	n := m.homeFavoritesN
+	if n < 0 {
+		return 0
+	}
+	if n > len(m.stations)-recN {
+		return len(m.stations) - recN
+	}
+	return n
 }
 
 func (m Model) playSelected() (tea.Model, tea.Cmd) {
@@ -238,6 +685,18 @@ func (m Model) playSelected() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	st := m.stations[m.cursor]
+
+	// Re-playing the station that's already playing keeps the bitrate you picked
+	// with the [ ] chooser; switching to a different station uses your preference.
+	if m.isPlaying && favKey(st) == favKey(m.playing) && m.varIdx >= 0 && m.varIdx < len(m.playing.Variants) {
+		v := m.playing.Variants[m.varIdx]
+		_ = m.player.Play(v.URL)
+		m.nowTitle = ""
+		m.status = "playing " + m.playing.Name + " · " + v.Quality()
+		m.recordRecent(st)
+		return m.startConnecting()
+	}
+
 	if v, ok := st.SelectVariant(m.quality); ok {
 		m.playing = st
 		m.varIdx = indexOfVariant(st.Variants, v)
@@ -245,10 +704,31 @@ func (m Model) playSelected() (tea.Model, tea.Cmd) {
 		m.isPlaying = true
 		m.nowTitle = ""
 		m.status = "playing " + st.Name + " · " + v.Quality()
-	} else {
-		m.status = "no playable stream for " + st.Name
+		m.recordRecent(st)
+		return m.startConnecting()
 	}
+	m.status = "no playable stream for " + st.Name
 	return m, nil
+}
+
+// recordRecent appends the station to the local play history, but only when the
+// user has opted in (history setting). Stored locally only — see store.AddRecent.
+func (m Model) recordRecent(st domain.Station) {
+	if m.history && m.store != nil {
+		_ = m.store.AddRecent(st)
+	}
+}
+
+// startConnecting enters the connecting phase and schedules a stale-guarded
+// timeout so a stream that never starts is reported as failed, not stuck.
+func (m Model) startConnecting() (tea.Model, tea.Cmd) {
+	m.phase = phaseConnecting
+	m.playErr = ""
+	m.playAttempt++
+	attempt := m.playAttempt
+	return m, tea.Tick(connectTimeout, func(time.Time) tea.Msg {
+		return connectTimeoutMsg{attempt: attempt}
+	})
 }
 
 // changeVariant switches the playing station to another available bitrate.
@@ -268,7 +748,7 @@ func (m Model) changeVariant(delta int) (tea.Model, tea.Cmd) {
 	v := m.playing.Variants[m.varIdx]
 	_ = m.player.Play(v.URL)
 	m.status = "quality " + v.Quality()
-	return m, nil
+	return m.startConnecting()
 }
 
 func indexOfVariant(vs []domain.StreamVariant, target domain.StreamVariant) int {
@@ -281,20 +761,28 @@ func indexOfVariant(vs []domain.StreamVariant, target domain.StreamVariant) int 
 }
 
 func (m Model) changeVolume(delta int) (tea.Model, tea.Cmd) {
-	m.volume += delta
-	if m.volume < 0 {
-		m.volume = 0
-	}
-	if m.volume > 100 {
-		m.volume = 100
-	}
+	m.volume = clampVolume(m.volume + delta)
 	_ = m.player.Volume(m.volume)
+	if m.store != nil {
+		_ = m.store.SaveVolume(m.volume)
+	}
 	m.status = "volume " + strconv.Itoa(m.volume) + "%"
 	return m, nil
 }
 
+// clampVolume bounds a volume to the 0–100 range.
+func clampVolume(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
+}
+
 func (m Model) toggleFavorite() (Model, tea.Cmd) {
-	if len(m.stations) == 0 {
+	if m.store == nil || len(m.stations) == 0 || m.cursor < 0 || m.cursor >= len(m.stations) {
 		return m, nil
 	}
 	st := m.stations[m.cursor]
@@ -307,19 +795,167 @@ func (m Model) toggleFavorite() (Model, tea.Cmd) {
 		m.status = "added to favorites: " + st.Name
 	}
 	m.markFavorites()
+	return m.syncFavoriteBackedView()
+}
+
+func (m Model) syncFavoriteBackedView() (Model, tea.Cmd) {
+	switch m.view {
+	case viewFavorites:
+		m.reloadFavoriteStations()
+	case viewHome:
+		m.rebuildHomeStations(m.homePopularStations())
+	}
+	m.clampCursor()
 	return m, nil
 }
 
 func (m Model) showFavorites() (tea.Model, tea.Cmd) {
+	m.view = viewFavorites
+	m.browseLevel = 0
+	m.cursor = 0
+	if !m.reloadFavoriteStations() {
+		return m, nil
+	}
+	m.markFavorites()
+	return m, nil
+}
+
+func (m *Model) reloadFavoriteStations() bool {
 	favs, err := m.store.Favorites()
 	if err != nil {
 		m.status = "error loading favorites: " + err.Error()
+		return false
+	}
+	m.stations = favs
+	m.clampCursor()
+	return true
+}
+
+func (m Model) favoriteStations() []domain.Station {
+	if m.store == nil {
+		return nil
+	}
+	favs, err := m.store.Favorites()
+	if err != nil {
+		return nil
+	}
+	return favs
+}
+
+func (m *Model) clampCursor() {
+	if len(m.stations) == 0 {
+		m.cursor = 0
+		return
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor >= len(m.stations) {
+		m.cursor = len(m.stations) - 1
+	}
+}
+
+// showRecents opens the locally-stored play history (newest first).
+func (m Model) showRecents() (tea.Model, tea.Cmd) {
+	if m.store == nil {
 		return m, nil
 	}
-	m.view = viewFavorites
-	m.stations = favs
+	recents, err := m.store.Recents()
+	if err != nil {
+		m.status = "error loading recents: " + err.Error()
+		return m, nil
+	}
+	m.view = viewRecents
+	m.browseLevel = 0
+	m.crumb = "recents"
+	m.stations = recents
 	m.cursor = 0
 	m.markFavorites()
+	return m, nil
+}
+
+// clearRecents wipes the local play history.
+func (m Model) clearRecents() (tea.Model, tea.Cmd) {
+	if m.store != nil {
+		_ = m.store.ClearRecents()
+	}
+	m.stations = nil
+	m.cursor = 0
+	m.status = "cleared play history"
+	return m, nil
+}
+
+// axisMenu lists the top-level browse axes shown at browseLevel 0.
+func axisMenu() []domain.Facet {
+	return []domain.Facet{{Name: "By Country"}, {Name: "By Genre"}, {Name: "By Language"}}
+}
+
+// axisForIndex maps an axisMenu cursor position to its domain.Axis.
+func axisForIndex(i int) domain.Axis {
+	switch i {
+	case 1:
+		return domain.AxisTag
+	case 2:
+		return domain.AxisLanguage
+	default:
+		return domain.AxisCountry
+	}
+}
+
+// openBrowse enters the browse menu at level 0 (choose an axis).
+func (m Model) openBrowse() (tea.Model, tea.Cmd) {
+	m.view = viewBrowseMenu
+	m.browseLevel = 0
+	m.facets = axisMenu()
+	m.cursor = 0
+	m.crumb = "browse"
+	m.stations = nil
+	m.hoverIdx = -1
+	return m, nil
+}
+
+// updateBrowseMenu drives the axis menu (level 0) and facet list (level 1).
+func (m Model) updateBrowseMenu(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch k.String() {
+	case "ctrl+c", "q":
+		return m, tea.Quit
+	case "down", "j":
+		if m.cursor < len(m.facets)-1 {
+			m.cursor++
+		}
+		return m, nil
+	case "up", "k":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+		return m, nil
+	case "enter":
+		if m.browseLevel == 0 {
+			m.browseAxis = axisForIndex(m.cursor)
+			m.browseLevel = 1
+			m.facets = nil
+			m.cursor = 0
+			return m.load(facetsCmd(m.dir, m.browseAxis))
+		}
+		if m.cursor < len(m.facets) {
+			value := m.facets[m.cursor].Name
+			m.view = viewBrowse
+			m.browseLevel = 2
+			m.browseValue = value
+			m.browseSort = domain.Sort{}
+			m.crumb = value + " · " + m.browseSort.Label()
+			return m.load(stationsByCmd(m.dir, m.browseAxis, value, m.browseSort))
+		}
+		return m, nil
+	case "esc":
+		if m.browseLevel == 1 {
+			m.browseLevel = 0
+			m.facets = axisMenu()
+			m.cursor = 0
+			return m, nil
+		}
+		return m.goHome()
+	}
 	return m, nil
 }
 
@@ -415,16 +1051,20 @@ func (m Model) submitAdd() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
+	var s string
 	switch m.view {
 	case viewHome:
-		return m.viewHome()
+		s = m.viewHome()
 	case viewSearch:
-		return m.viewSearch()
+		s = m.viewSearch()
 	case viewAdd:
-		return m.viewAdd()
+		s = m.viewAdd()
 	case viewSettings:
-		return m.viewSettings()
+		s = m.viewSettings()
+	case viewBrowseMenu:
+		s = m.viewBrowseMenu()
 	default:
-		return m.viewList()
+		s = m.viewList()
 	}
+	return clampWidth(indentLines(s, gutter), m.width)
 }

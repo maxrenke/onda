@@ -5,11 +5,36 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/pedrosousa13/radio/internal/domain"
+	"github.com/pedrosousa13/onda/internal/directory"
+	"github.com/pedrosousa13/onda/internal/domain"
 )
 
-// reserved vertical space: header(2) + blank(1) + now-panel(5) + footer(1).
-const chromeHeight = 9
+// reserved vertical space: header(2) + blank(1) + blank(1) + now-panel(5) + footer(1).
+const chromeHeight = 10
+
+// gutter is the left/right breathing-room margin applied to every view.
+const gutter = 2
+
+// contentWidth is the usable width inside the left and right gutters.
+func (m Model) contentWidth() int {
+	w := m.width - 2*gutter
+	if w < 20 {
+		w = 20
+	}
+	return w
+}
+
+// indentLines prefixes every non-empty line with n spaces (the left gutter).
+func indentLines(s string, n int) string {
+	pad := strings.Repeat(" ", n)
+	lines := strings.Split(s, "\n")
+	for i, ln := range lines {
+		if ln != "" {
+			lines[i] = pad + ln
+		}
+	}
+	return strings.Join(lines, "\n")
+}
 
 func (m Model) viewList() string {
 	crumb := m.crumb
@@ -25,20 +50,27 @@ func (m Model) viewList() string {
 
 	var b strings.Builder
 	b.WriteString(m.header(crumb))
+	banner := m.updateBanner()
+	reserved := chromeHeight
+	if banner != "" {
+		b.WriteString("\n" + banner)
+		reserved++ // banner consumes one line below the header
+	}
 	b.WriteString("\n\n")
 
 	if m.loading && len(m.stations) == 0 {
 		b.WriteString(m.st.Meta.Render("  "+m.sp.View()+" finding stations…") + "\n")
-		for i := 1; i < m.height-chromeHeight; i++ {
+		for i := 1; i < m.height-reserved; i++ {
 			b.WriteString("\n")
 		}
-		b.WriteString(m.nowPanel())
+		b.WriteString("\n")
+		b.WriteString(m.nowPanel(m.contentWidth()))
 		b.WriteString("\n")
 		b.WriteString(m.footer())
 		return b.String()
 	}
 
-	listRows := m.height - chromeHeight
+	listRows := m.height - reserved
 	if listRows < 3 {
 		listRows = 3
 	}
@@ -55,17 +87,76 @@ func (m Model) viewList() string {
 	} else {
 		start, end := windowBounds(m.cursor, len(m.stations), listRows)
 		for i := start; i < end; i++ {
-			b.WriteString(m.renderRow(m.width, i, m.stations[i]) + "\n")
+			b.WriteString(m.renderRow(m.contentWidth(), i, m.stations[i]) + "\n")
 		}
 		for i := end - start; i < listRows; i++ {
 			b.WriteString("\n")
 		}
 	}
 
-	b.WriteString(m.nowPanel())
+	b.WriteString("\n")
+	b.WriteString(m.nowPanel(m.contentWidth()))
 	b.WriteString("\n")
 	b.WriteString(m.footer())
 	return b.String()
+}
+
+// viewBrowseMenu renders the browse axis/facet chooser: axis picker at level
+// 0, then the facet list ("countries"/"genres"/"languages") at level 1.
+func (m Model) viewBrowseMenu() string {
+	crumb := "browse"
+	if m.browseLevel != 0 {
+		switch m.browseAxis {
+		case domain.AxisTag:
+			crumb = "genres"
+		case domain.AxisLanguage:
+			crumb = "languages"
+		default:
+			crumb = "countries"
+		}
+	}
+	if m.loading {
+		crumb = m.sp.View() + " loading"
+	}
+
+	var b strings.Builder
+	b.WriteString(m.header(crumb))
+	b.WriteString("\n\n")
+
+	reserved := chromeHeight
+	listRows := m.height - reserved
+	if listRows < 3 {
+		listRows = 3
+	}
+
+	if m.loading && len(m.facets) == 0 {
+		b.WriteString(m.st.Meta.Render("  "+m.sp.View()+" finding facets…") + "\n")
+		for i := 1; i < listRows; i++ {
+			b.WriteString("\n")
+		}
+	} else {
+		start, end := windowBounds(m.cursor, len(m.facets), listRows)
+		for i := start; i < end; i++ {
+			b.WriteString(m.renderFacetRow(m.contentWidth(), i, m.facets[i]) + "\n")
+		}
+		for i := end - start; i < listRows; i++ {
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(m.nowPanel(m.contentWidth()))
+	b.WriteString("\n")
+	b.WriteString(m.browseMenuFooter())
+	return b.String()
+}
+
+// browseMenuFooter is the key-hint bar for the browse axis/facet chooser.
+func (m Model) browseMenuFooter() string {
+	pairs := [][2]string{
+		{"↑↓", "move"}, {"⏎", "open"}, {"esc", "back"}, {"q", "quit"},
+	}
+	return m.renderFooterPairs(pairs)
 }
 
 // viewHome is the landing screen: now-playing hero on top, then favorites
@@ -73,43 +164,130 @@ func (m Model) viewList() string {
 func (m Model) viewHome() string {
 	var b strings.Builder
 	b.WriteString(m.header("home"))
-	b.WriteString("\n\n")
-	b.WriteString(m.nowPanel())
-	b.WriteString("\n\n")
-
-	hasFavs := len(m.favKeys) > 0
-	if hasFavs {
-		b.WriteString(m.st.Crumb.Render("favorites") + "\n")
-	} else {
-		b.WriteString(m.st.Crumb.Render("popular") +
-			m.st.Help.Render("   (no favorites yet — press ") + m.st.Key.Render("f") +
-			m.st.Help.Render(" on any station to save it)") + "\n")
+	b.WriteString("\n")
+	if m.bannerVisible() {
+		b.WriteString(m.catalogBanner())
 	}
+	b.WriteString("\n")
 
-	// header(2) + blank(1) + panel(5) + blank(1) + label(1) + footer(1)
-	listRows := m.height - 11
+	// Centered hero, capped so it doesn't stretch on wide terminals.
+	heroWidth := m.contentWidth()
+	if heroWidth > 56 {
+		heroWidth = 56
+	}
+	b.WriteString(lipgloss.PlaceHorizontal(m.contentWidth(), lipgloss.Center, m.nowPanel(heroWidth)))
+	b.WriteString("\n")
+	hint := m.st.Help.Render("press ") + m.st.Key.Render("/") + m.st.Help.Render(" to search")
+	b.WriteString(lipgloss.PlaceHorizontal(m.contentWidth(), lipgloss.Center, hint))
+	b.WriteString("\n\n")
+
+	cw := m.contentWidth()
+	// header(2) + blank(1) + panel(5) + hint(1) + blank(1) + labels/footer
+	listRows := m.height - 13
 	if listRows < 3 {
 		listRows = 3
 	}
-	if m.loading && len(m.stations) == 0 {
-		b.WriteString(m.st.Meta.Render("  " + m.sp.View() + " loading…") + "\n")
-	} else if len(m.stations) == 0 {
-		b.WriteString(m.st.Meta.Render("  nothing to show") + "\n")
+	if len(m.stations) == 0 {
+		b.WriteString(m.st.Crumb.Render("popular") +
+			m.st.Help.Render("   (no favorites yet — press ") + m.st.Key.Render("f") +
+			m.st.Help.Render(" on any station to save it)") + "\n")
+		if m.loading {
+			b.WriteString(m.st.Meta.Render("  "+m.sp.View()+" loading…") + "\n")
+		} else {
+			b.WriteString(m.st.Meta.Render("  nothing to show") + "\n")
+		}
 	} else {
 		start, end := windowBounds(m.cursor, len(m.stations), listRows)
-		for i := start; i < end; i++ {
-			b.WriteString(m.renderRow(m.width, i, m.stations[i]) + "\n")
+		for _, sec := range m.homeSections() {
+			visStart, visEnd := sec.start, sec.end
+			if visStart < start {
+				visStart = start
+			}
+			if visEnd > end {
+				visEnd = end
+			}
+			if visStart >= visEnd {
+				continue
+			}
+			b.WriteString(m.st.Crumb.Render(sec.label))
+			if sec.help != "" {
+				b.WriteString(sec.help)
+			}
+			b.WriteString("\n")
+			for i := visStart; i < visEnd; i++ {
+				b.WriteString(m.renderRow(cw, i, m.stations[i]) + "\n")
+			}
 		}
+	}
+	if m.loading && len(m.homePopularStations()) == 0 {
+		b.WriteString(m.st.Crumb.Render("popular") + "\n")
+		b.WriteString(m.st.Meta.Render("  "+m.sp.View()+" loading…") + "\n")
 	}
 	b.WriteString("\n")
 	b.WriteString(m.homeFooter())
 	return b.String()
 }
 
+type homeSection struct {
+	label      string
+	help       string
+	start, end int
+}
+
+func (m Model) homeSections() []homeSection {
+	recN := m.homeRecentsN()
+	favN := m.homeFavoritesCount()
+	popStart := recN + favN
+	sections := make([]homeSection, 0, 3)
+	if recN > 0 {
+		sections = append(sections, homeSection{label: "recent", start: 0, end: recN})
+	}
+	if favN > 0 {
+		sections = append(sections, homeSection{label: "favorites", start: recN, end: popStart})
+	}
+	if popStart < len(m.stations) {
+		sec := homeSection{label: "popular", start: popStart, end: len(m.stations)}
+		if favN == 0 {
+			sec.help = m.st.Help.Render("   (no favorites yet — press ") + m.st.Key.Render("f") +
+				m.st.Help.Render(" on any station to save it)")
+		}
+		sections = append(sections, sec)
+	}
+	return sections
+}
+
+// homeFavWindow computes the Home two-section geometry: how many recent rows to
+// pin (dispRecN, clamped to leave room) and the visible [favStart,favEnd) slice
+// into the favorites/popular sub-list m.stations[recN:], keeping the cursor in view.
+func (m Model) homeFavWindow(listRows int) (dispRecN, favStart, favEnd, favRows int) {
+	recN := m.homeRecentsN()
+	dispRecN = recN
+	if dispRecN > listRows-1 {
+		dispRecN = listRows - 1
+	}
+	if dispRecN < 0 {
+		dispRecN = 0
+	}
+	favRows = listRows - dispRecN
+	if favRows < 1 {
+		favRows = 1
+	}
+	favTotal := len(m.stations) - recN
+	if favTotal < 0 {
+		favTotal = 0
+	}
+	favCursor := m.cursor - recN
+	if favCursor < 0 {
+		favCursor = 0
+	}
+	favStart, favEnd = windowBounds(favCursor, favTotal, favRows)
+	return
+}
+
 func (m Model) homeFooter() string {
 	pairs := [][2]string{
 		{"↑↓", "move"}, {"⏎", "play"}, {"+/-", "vol"}, {"[ ]", "quality"},
-		{"/", "search"}, {"p", "popular"}, {"F", "favorites"}, {"a", "add"},
+		{"/", "search"}, {"b", "browse"}, {"p", "popular"}, {"F", "favorites"}, {"a", "add"},
 		{",", "settings"}, {"q", "quit"},
 	}
 	return m.renderFooterPairs(pairs)
@@ -117,14 +295,52 @@ func (m Model) homeFooter() string {
 
 // header renders the title line plus a right-aligned view label and a rule.
 func (m Model) header(crumb string) string {
-	left := m.st.Title.Render("radio") + m.st.Subtitle.Render("  ·  wander the world")
+	left := m.st.Title.Render("onda") + m.st.Subtitle.Render("  ·  wander the airwaves")
 	right := m.st.Crumb.Render(crumb)
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
+	if m.refreshing {
+		mb := directory.HumanBytes(m.downloaded)
+		right = m.st.Meta.Render(m.sp.View()+" building offline catalog… "+mb+"  ") + right
+	}
+	w := m.contentWidth()
+	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		gap = 1
 	}
-	rule := m.st.Rule.Render(strings.Repeat("─", max(1, m.width)))
+	rule := m.st.Rule.Render(strings.Repeat("─", max(1, w)))
 	return left + strings.Repeat(" ", gap) + right + "\n" + rule
+}
+
+// updateBanner is a one-line notice shown under the header when a newer onda
+// release exists. Its text branches on how onda was installed.
+func (m Model) updateBanner() string {
+	if !m.update.Available || m.updateDismiss {
+		return ""
+	}
+	v := m.update.Latest
+	var msg string
+	switch {
+	case m.updateApplying:
+		msg = "updating to " + v + "…"
+	case m.update.SelfUpdatable:
+		msg = v + " available — press u to update"
+	case m.update.InstallKind == "homebrew":
+		msg = v + " available — run `brew upgrade --cask onda`"
+	case m.update.InstallKind == "scoop":
+		msg = v + " available — run `scoop update onda`"
+	default:
+		msg = v + " available — see github.com/pedrosousa13/onda/releases"
+	}
+	return m.st.Meta.Render("  ▲ "+msg) + m.st.Help.Render("  (U dismiss)")
+}
+
+// catalogBanner offers the full offline catalog on first launch, while
+// consent is still undecided (offlineCatalog == "ask"). Shown only on Home.
+func (m Model) catalogBanner() string {
+	line1 := m.st.Meta.Render("  ⓘ Enable full offline catalog for typo-tolerant search?")
+	line2 := m.st.Help.Render("    "+catalogSizeHint+", downloads in background.   ") +
+		m.st.Key.Render("[y]") + m.st.Help.Render(" yes   ") +
+		m.st.Key.Render("[n]") + m.st.Help.Render(" not now")
+	return line1 + "\n" + line2 + "\n"
 }
 
 // renderRow lays out one station: ▌ name … country · 128k ★
@@ -137,6 +353,12 @@ func (m Model) renderRow(w, idx int, s domain.Station) string {
 			meta += " · " + q
 		}
 	}
+	if s.Votes > 0 {
+		meta += " · " + humanCount(s.Votes) + "♥"
+	}
+	if s.Trend > 0 {
+		meta += " ↑"
+	}
 	fav := m.favKeys[favKey(s)]
 	starPlain := ""
 	if fav {
@@ -144,21 +366,25 @@ func (m Model) renderRow(w, idx int, s domain.Station) string {
 	}
 	rightPlain := meta + starPlain
 
-	avail := w - 2 /*marker*/ - 1 /*gap*/ - lipgloss.Width(rightPlain)
+	avail := w - 2 /*marker*/ - 1 /*gap*/ - dispWidth(rightPlain)
 	if avail < 4 {
 		avail = 4
 	}
-	name := truncate(s.Name, avail)
-	pad := avail - lipgloss.Width(name)
+	name := truncate(sanitizeName(s.Name), avail)
+	pad := avail - dispWidth(name)
 	if pad < 0 {
 		pad = 0
 	}
 
 	var marker, nameS string
-	if sel {
+	switch {
+	case sel:
 		marker = m.st.SelBar.Render("▌ ")
 		nameS = m.st.SelName.Render(name)
-	} else {
+	case idx == m.hoverIdx:
+		marker = m.st.Meta.Render("· ") // mouse hover cue
+		nameS = m.st.Item.Render(name)
+	default:
 		marker = "  "
 		nameS = m.st.Item.Render(name)
 	}
@@ -169,10 +395,56 @@ func (m Model) renderRow(w, idx int, s domain.Station) string {
 	return marker + nameS + strings.Repeat(" ", pad) + " " + m.st.Meta.Render(meta) + starS
 }
 
+// humanCount formats a count for compact display: 412→"412", 1200→"1.2k".
+func humanCount(n int) string {
+	if n < 1000 {
+		return strconv.Itoa(n)
+	}
+	return strconv.FormatFloat(float64(n)/1000, 'f', 1, 64) + "k"
+}
+
+// renderFacetRow lays out one browse facet: ▌ Portugal … 412
+func (m Model) renderFacetRow(w, idx int, f domain.Facet) string {
+	sel := idx == m.cursor
+
+	rightPlain := ""
+	if f.Count > 0 {
+		rightPlain = humanCount(f.Count)
+	}
+
+	avail := w - 2 /*marker*/ - 1 /*gap*/ - dispWidth(rightPlain)
+	if avail < 4 {
+		avail = 4
+	}
+	name := truncate(sanitizeName(f.Name), avail)
+	pad := avail - dispWidth(name)
+	if pad < 0 {
+		pad = 0
+	}
+
+	var marker, nameS string
+	switch {
+	case sel:
+		marker = m.st.SelBar.Render("▌ ")
+		nameS = m.st.SelName.Render(name)
+	case idx == m.hoverIdx:
+		marker = m.st.Meta.Render("· ") // mouse hover cue
+		nameS = m.st.Item.Render(name)
+	default:
+		marker = "  "
+		nameS = m.st.Item.Render(name)
+	}
+	right := ""
+	if f.Count > 0 {
+		right = " " + m.st.Meta.Render(rightPlain)
+	}
+	return marker + nameS + strings.Repeat(" ", pad) + right
+}
+
 // nowPanel is the bordered "now playing" hero. Line 1: station + volume,
 // line 2: song / tags / status, line 3: the bitrate chooser.
-func (m Model) nowPanel() string {
-	inner := m.width - 4 // border(2) + padding(2)
+func (m Model) nowPanel(width int) string {
+	inner := width - 4 // border(2) + padding(2)
 	if inner < 12 {
 		inner = 12
 	}
@@ -191,9 +463,13 @@ func (m Model) nowPanel() string {
 	}
 	line1 := name + strings.Repeat(" ", g1) + vol
 
-	// Line 2 — current song (sanitized), else tags, else status.
+	// Line 2 — phase-aware: connecting / error, else song, tags, or status.
 	var line2 string
 	switch {
+	case m.phase == phaseFailed:
+		line2 = m.st.Subtitle.Render(truncate(m.playErr, inner))
+	case m.phase == phaseConnecting:
+		line2 = m.st.NowTitle.Render(truncate("connecting…", inner))
 	case !m.isPlaying:
 		line2 = m.st.Meta.Render("select a station and press enter to play")
 	case m.nowTitle != "":
@@ -212,7 +488,7 @@ func (m Model) nowPanel() string {
 
 	content := line1 + "\n" + line2 + "\n" + line3
 	// Panel.Width is the content box incl. padding(0,1); total = width-2+border(2) = width.
-	return m.st.Panel.Width(m.width - 2).Render(content)
+	return m.st.Panel.Width(width - 2).Render(content)
 }
 
 // qualityChips renders the playing station's available qualities; the active one
@@ -234,22 +510,32 @@ func (m Model) qualityChips(maxW int) string {
 	return out
 }
 
+// volumeBar renders volume as a labelled slider: a track with a knob, so it
+// reads as a continuous level rather than a stack of signal-strength bars.
 func (m Model) volumeBar() string {
 	const cells = 10
-	on := m.volume * cells / 100
-	if on > cells {
-		on = cells
+	pos := m.volume * (cells - 1) / 100
+	if pos > cells-1 {
+		pos = cells - 1
 	}
-	bar := m.st.VolOn.Render(strings.Repeat("▮", on)) +
-		m.st.VolOff.Render(strings.Repeat("▯", cells-on))
-	return bar + " " + m.st.Meta.Render(strconv.Itoa(m.volume)+"%")
+	track := m.st.VolOn.Render(strings.Repeat("─", pos)) +
+		m.st.VolOn.Render("●") +
+		m.st.VolOff.Render(strings.Repeat("─", cells-1-pos))
+	return m.st.Meta.Render("vol ") + track + " " + m.st.Meta.Render(strconv.Itoa(m.volume)+"%")
 }
 
 func (m Model) footer() string {
+	escPair := [2]string{"esc", "home"}
+	if m.browseLevel == 2 {
+		escPair = [2]string{"esc", "back"}
+	}
 	pairs := [][2]string{
 		{"↑↓", "move"}, {"⏎", "play"}, {"s", "stop"}, {"+/-", "vol"},
 		{"[ ]", "quality"}, {"f", "★"}, {"F", "favs"}, {"/", "search"},
-		{"a", "add"}, {",", "settings"}, {"esc", "home"}, {"q", "quit"},
+		{"b", "browse"}, {"a", "add"}, {",", "settings"}, escPair, {"q", "quit"},
+	}
+	if m.browseLevel == 2 {
+		pairs = append(pairs, [2]string{"o", "sort"}, [2]string{"O", "reverse"})
 	}
 	return m.renderFooterPairs(pairs)
 }
@@ -265,7 +551,7 @@ func (m Model) renderFooterPairs(pairs [][2]string) string {
 		if i > 0 {
 			add += 2
 		}
-		if wsum+add > m.width {
+		if wsum+add > m.contentWidth() {
 			break
 		}
 		if i > 0 {
@@ -292,17 +578,137 @@ func windowBounds(cursor, n, rows int) (int, int) {
 	return start, start + rows
 }
 
+// clampWidth hard-caps every line of s to w display columns, so a stray
+// over-wide line can never soft-wrap in the terminal and desync Bubble Tea's
+// line-diff renderer. This is the single authoritative backstop on top of
+// per-row truncation.
+//
+// It measures conservatively (dispWidth) rather than with lipgloss's
+// Unicode-correct width: a complex-script line (Tamil, Devanagari, …) can be
+// DRAWN wider than lipgloss reports, so lipgloss.MaxWidth would let it slip
+// through — exactly the wrap that desyncs the renderer. Over-cutting such a
+// line is the safe direction.
+func clampWidth(s string, w int) string {
+	if w <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, ln := range lines {
+		lines[i] = clampLine(ln, w)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// clampLine truncates one line to at most w display columns, measured with the
+// conservative dispWidth and skipping ANSI SGR escape sequences (which occupy
+// no columns). If it has to cut, it appends a reset so a severed styled span
+// can't bleed color into the rest of the frame.
+func clampLine(s string, w int) string {
+	var b strings.Builder
+	width := 0
+	runes := []rune(s)
+	cut := false
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if r == 0x1b { // ESC — copy the whole escape sequence verbatim, uncounted
+			j := i + 1
+			if j < len(runes) && runes[j] == '[' { // CSI: ESC '[' … final byte 0x40–0x7e
+				j++
+				for j < len(runes) && (runes[j] < 0x40 || runes[j] > 0x7e) {
+					j++
+				}
+				if j < len(runes) {
+					j++ // include the final byte
+				}
+			}
+			for k := i; k < j; k++ {
+				b.WriteRune(runes[k])
+			}
+			i = j - 1
+			continue
+		}
+		rw := runeCells(r)
+		if width+rw > w {
+			cut = true
+			break
+		}
+		b.WriteRune(r)
+		width += rw
+	}
+	if cut {
+		b.WriteString("\x1b[0m")
+	}
+	return b.String()
+}
+
+// runeCells is a CONSERVATIVE cell count for one rune: wide glyphs (CJK) keep
+// their 2 cells, but everything else — including combining marks that Unicode
+// (and lipgloss) count as 0 — is treated as at least 1 cell. Terminals that
+// don't shape complex scripts (Tamil, Devanagari, …) render each codepoint in
+// its own cell, so lipgloss's Unicode-correct width UNDER-counts what the
+// terminal actually draws. Over-counting here is the safe direction: a row can
+// never end up wider than its budget, which would soft-wrap and desync Bubble
+// Tea's line-diff renderer.
+func runeCells(r rune) int {
+	if w := lipgloss.Width(string(r)); w > 1 {
+		return w
+	}
+	// Complex scripts (Arabic, Indic, SE-Asian — e.g. Tamil) are drawn with
+	// combining marks and base glyphs that many terminals/fonts render WIDER
+	// than lipgloss's Unicode width reports (verified: a standard grid fits a
+	// Tamil row that a real terminal wraps). A monospace cell can hold at most
+	// 2 columns per codepoint, so reserving 2 here upper-bounds whatever the
+	// terminal actually draws and guarantees the row can't overflow and wrap.
+	if r >= 0x0600 && r < 0x1100 {
+		return 2
+	}
+	return 1
+}
+
+// dispWidth is the conservative display width of s (see runeCells).
+func dispWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		w += runeCells(r)
+	}
+	return w
+}
+
+// sanitizeName strips control characters (tabs, stray newlines from dirty
+// station data) that would otherwise break row layout, and trims the result.
+func sanitizeName(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
+	return strings.TrimSpace(s)
+}
+
 // truncate shortens s to at most w display columns, adding an ellipsis.
+// It measures conservatively (dispWidth) so wide or complex-script glyphs can't
+// produce a row wider than its budget — an overflowing row soft-wraps in the
+// terminal and desyncs Bubble Tea's line-diff renderer.
 func truncate(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) <= w {
+	if dispWidth(s) <= w {
 		return s
 	}
 	if w == 1 {
 		return "…"
 	}
-	return string(r[:w-1]) + "…"
+	var b strings.Builder
+	width := 0
+	for _, r := range s {
+		rw := runeCells(r)
+		if width+rw > w-1 { // leave one column for the ellipsis
+			break
+		}
+		b.WriteRune(r)
+		width += rw
+	}
+	return b.String() + "…"
 }

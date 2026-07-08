@@ -85,6 +85,37 @@ func TestGroupRecordsBroadcasterPrefixAndRegion(t *testing.T) {
 	}
 }
 
+func TestGroupRecordsCarriesVotes(t *testing.T) {
+	recs := []record{
+		{Name: "Radio Eins", Country: "Germany", URL: "a", Bitrate: 128, Votes: 10, ClickCount: 5},
+		{Name: "Radio Eins", Country: "Germany", URL: "b", Bitrate: 64, Votes: 42, ClickCount: 9}, // same station, higher votes
+	}
+	out := GroupRecords(recs)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 grouped station, got %d", len(out))
+	}
+	if out[0].Votes != 42 {
+		t.Fatalf("station should carry max votes across variants, got %d", out[0].Votes)
+	}
+}
+
+func TestGroupRecordsCarriesLanguageAndTrend(t *testing.T) {
+	recs := []record{
+		{Name: "Radio Eins", Country: "Germany", Language: "German", URL: "a", Bitrate: 128, Trend: 5},
+		{Name: "Radio Eins", Country: "Germany", Language: "German", URL: "b", Bitrate: 64, Trend: 12}, // same station, higher trend
+	}
+	out := GroupRecords(recs)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 grouped station, got %d", len(out))
+	}
+	if out[0].Language != "German" {
+		t.Fatalf("station should carry language, got %q", out[0].Language)
+	}
+	if out[0].Trend != 12 {
+		t.Fatalf("station should carry max trend across variants, got %d", out[0].Trend)
+	}
+}
+
 func TestGroupRecordsMergesQualitySuffixes(t *testing.T) {
 	// Real FIP-style duplicates: same station, split by quality/format suffixes
 	// and punctuation, with differing homepages.
