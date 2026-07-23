@@ -690,7 +690,9 @@ func (m Model) playSelected() (tea.Model, tea.Cmd) {
 	// with the [ ] chooser; switching to a different station uses your preference.
 	if m.isPlaying && favKey(st) == favKey(m.playing) && m.varIdx >= 0 && m.varIdx < len(m.playing.Variants) {
 		v := m.playing.Variants[m.varIdx]
-		_ = m.player.Play(v.URL)
+		if err := m.player.Play(v.URL); err != nil {
+			return m.playbackFailed(err)
+		}
 		m.nowTitle = ""
 		m.status = "playing " + m.playing.Name + " · " + v.Quality()
 		m.recordRecent(st)
@@ -698,9 +700,11 @@ func (m Model) playSelected() (tea.Model, tea.Cmd) {
 	}
 
 	if v, ok := st.SelectVariant(m.quality); ok {
+		if err := m.player.Play(v.URL); err != nil {
+			return m.playbackFailed(err)
+		}
 		m.playing = st
 		m.varIdx = indexOfVariant(st.Variants, v)
-		_ = m.player.Play(v.URL)
 		m.isPlaying = true
 		m.nowTitle = ""
 		m.status = "playing " + st.Name + " · " + v.Quality()
@@ -708,6 +712,17 @@ func (m Model) playSelected() (tea.Model, tea.Cmd) {
 		return m.startConnecting()
 	}
 	m.status = "no playable stream for " + st.Name
+	return m, nil
+}
+
+func (m Model) playbackFailed(err error) (tea.Model, tea.Cmd) {
+	m.phase = phaseFailed
+	m.playErr = "couldn't play stream"
+	if err != nil {
+		m.status = "couldn't play: " + err.Error()
+	} else {
+		m.status = "couldn't play"
+	}
 	return m, nil
 }
 
@@ -738,15 +753,18 @@ func (m Model) changeVariant(delta int) (tea.Model, tea.Cmd) {
 		m.status = "only one quality available"
 		return m, nil
 	}
-	m.varIdx += delta
-	if m.varIdx < 0 {
-		m.varIdx = 0
+	nextIdx := m.varIdx + delta
+	if nextIdx < 0 {
+		nextIdx = 0
 	}
-	if m.varIdx > len(m.playing.Variants)-1 {
-		m.varIdx = len(m.playing.Variants) - 1
+	if nextIdx > len(m.playing.Variants)-1 {
+		nextIdx = len(m.playing.Variants) - 1
 	}
-	v := m.playing.Variants[m.varIdx]
-	_ = m.player.Play(v.URL)
+	v := m.playing.Variants[nextIdx]
+	if err := m.player.Play(v.URL); err != nil {
+		return m.playbackFailed(err)
+	}
+	m.varIdx = nextIdx
 	m.status = "quality " + v.Quality()
 	return m.startConnecting()
 }
