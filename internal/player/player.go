@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -83,18 +84,23 @@ func (p *Player) ensureStarted() error {
 		args = append(args, fmt.Sprintf("--volume=%d", *p.volume))
 	}
 	cmd := exec.Command(p.bin, args...)
+	configureCmd(cmd) // platform-specific; process group on Unix, no-op on Windows
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	conn, err := dialWithRetry(p.sock) // platform-specific dialer
 	if err != nil {
-		reap(cmd)
+		if reapErr := reap(cmd); reapErr != nil {
+			return errors.Join(err, reapErr)
+		}
 		return err
 	}
 	p.cmd = cmd
 	p.conn = conn
 	if err := p.observeLocked(); err != nil {
-		p.closeLocked()
+		if closeErr := p.closeLocked(); closeErr != nil {
+			return errors.Join(err, closeErr)
+		}
 		return err
 	}
 	p.started = true
@@ -234,25 +240,41 @@ func (p *Player) Close() error {
 	if !p.started {
 		return nil
 	}
-	p.closeLocked()
-	return nil
+	return p.closeLocked()
 }
 
 // closeLocked tears down the mpv process and IPC connection. Callers must hold
 // p.mu and must only call this when mpv has actually been started.
-func (p *Player) closeLocked() {
+func (p *Player) closeLocked() error {
 	if p.conn != nil {
 		_ = p.conn.Close()
 	}
-	reap(p.cmd)
+	err := reap(p.cmd)
 	cleanupIPC(p.sock) // platform-specific; removes the socket file on Unix, no-op on Windows
+	return err
 }
 
-// reap kills mpv and waits for it, so no zombie process is left behind.
-func reap(cmd *exec.Cmd) {
+// reap kills mpv and waits for it, so no orphan is left behind.
+//
+// It kills the whole process tree, not just the process we spawned: the mpv on
+// PATH is often a wrapper that runs the real player as a child (mpv.com on
+// Windows/scoop, shell wrappers on Unix), and killing only the wrapper leaves
+// the player running and still producing audio after onda exits.
+// (*os.Process).Kill returns nil in that case, so the failure is invisible —
+// which is why the errors here are returned rather than discarded.
+func reap(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil {
-		return
+		return nil
 	}
-	_ = cmd.Process.Kill()
-	_, _ = cmd.Process.Wait()
+	pid := cmd.Process.Pid
+	// Tree first, while the parent is still alive to link its children.
+	treeErr := killTree(pid)
+	// Then the direct child, in case the tree kill missed it.
+	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) && treeErr != nil {
+		return fmt.Errorf("killing mpv (pid %d): %w (tree kill: %v)", pid, err, treeErr)
+	}
+	if _, err := cmd.Process.Wait(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("waiting for mpv (pid %d): %w", pid, err)
+	}
+	return treeErr
 }

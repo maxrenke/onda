@@ -3,6 +3,11 @@ package player
 import (
 	"os"
 	"os/exec"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -169,4 +174,98 @@ func TestVolumeBeforeStartIsStored(t *testing.T) {
 
 func lookPathMpv() (string, error) {
 	return exec.LookPath("mpv")
+}
+
+func TestIPCAddressIsProcessUnique(t *testing.T) {
+	addr := ipcAddress()
+	if !strings.Contains(addr, strconv.Itoa(os.Getpid())) {
+		t.Fatalf("ipcAddress must be unique per process, got %q", addr)
+	}
+	if addr != ipcAddress() {
+		t.Fatalf("ipcAddress must be stable within a process, got %q then %q", addr, ipcAddress())
+	}
+}
+
+func TestReapNilIsNoError(t *testing.T) {
+	if err := reap(nil); err != nil {
+		t.Fatalf("reap(nil) = %v, want nil", err)
+	}
+	if err := reap(&exec.Cmd{}); err != nil {
+		t.Fatalf("reap(unstarted) = %v, want nil", err)
+	}
+}
+
+func pidAlive(t *testing.T, pid int) bool {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		out, err := exec.Command("tasklist", "/FI", "PID eq "+strconv.Itoa(pid), "/NH").Output()
+		if err != nil {
+			t.Fatalf("tasklist: %v", err)
+		}
+		return strings.Contains(string(out), strconv.Itoa(pid))
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// TestReapKillsStartedProcess guards the orphan bug: `mpv` on PATH is often a
+// wrapper (mpv.com on Windows) whose child keeps playing when only the direct
+// process is killed, so assert nothing named mpv survives the reap.
+func TestReapKillsStartedProcess(t *testing.T) {
+	bin, err := exec.LookPath("mpv")
+	if err != nil {
+		t.Skip("mpv not installed")
+	}
+	before := mpvPids(t)
+	cmd := exec.Command(bin, "--idle=yes", "--no-video", "--no-terminal")
+	configureCmd(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	time.Sleep(750 * time.Millisecond) // let a wrapper spawn its child
+	if err := reap(cmd); err != nil {
+		t.Fatalf("reap returned %v", err)
+	}
+	time.Sleep(750 * time.Millisecond)
+	if pidAlive(t, pid) {
+		t.Fatalf("pid %d still alive after reap", pid)
+	}
+	for _, p := range mpvPids(t) {
+		if !slices.Contains(before, p) {
+			t.Fatalf("reap left an orphaned mpv process (pid %s) behind", p)
+		}
+	}
+}
+
+// mpvPids lists every running mpv process, so the test can tell a leftover
+// child apart from unrelated mpv instances that were already running.
+func mpvPids(t *testing.T) []string {
+	t.Helper()
+	var out []byte
+	var err error
+	if runtime.GOOS == "windows" {
+		out, err = exec.Command("tasklist", "/FI", "IMAGENAME eq mpv.exe", "/NH", "/FO", "CSV").Output()
+	} else {
+		out, _ = exec.Command("pgrep", "-x", "mpv").Output()
+		var pids []string
+		for _, l := range strings.Fields(string(out)) {
+			pids = append(pids, l)
+		}
+		return pids
+	}
+	if err != nil {
+		t.Fatalf("tasklist: %v", err)
+	}
+	var pids []string
+	for _, l := range strings.Split(string(out), "\n") {
+		f := strings.Split(l, "\",\"")
+		if len(f) > 1 {
+			pids = append(pids, f[1])
+		}
+	}
+	return pids
 }
